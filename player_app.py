@@ -5,6 +5,7 @@ import threading
 import os
 import json
 import time
+import cv2
 from PIL import Image, ImageTk
 import numpy as np
 
@@ -97,6 +98,53 @@ class VideoAnimationApp:
 
         ttk.Button(toolbar, text="全屏", command=self._toggle_fullscreen).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="停止", command=self._stop_playback).pack(side=tk.LEFT, padx=2)
+
+        # ─── 序列帧动画配置面板 ───
+        anim_frame = ttk.LabelFrame(self.root, text="序列帧动画配置", padding=5)
+        anim_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        # 序列A
+        row_a = ttk.Frame(anim_frame)
+        row_a.pack(fill=tk.X, pady=2)
+        ttk.Label(row_a, text="序列A目录:", width=10).pack(side=tk.LEFT)
+        self.a_path_var = tk.StringVar()
+        self.a_path_entry = ttk.Entry(row_a, textvariable=self.a_path_var, width=50)
+        self.a_path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(row_a, text="选择目录", command=lambda: self._select_seq_dir("a")).pack(side=tk.LEFT, padx=2)
+        self.a_loop_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row_a, text="循环", variable=self.a_loop_var).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_a, text="帧时长(秒):").pack(side=tk.LEFT, padx=2)
+        self.a_dur_var = tk.StringVar(value="0.1")
+        ttk.Entry(row_a, textvariable=self.a_dur_var, width=6).pack(side=tk.LEFT, padx=2)
+        self.a_status_var = tk.StringVar(value="未加载")
+        ttk.Label(row_a, textvariable=self.a_status_var, foreground="gray", width=12).pack(side=tk.LEFT, padx=5)
+
+        # 序列B
+        row_b = ttk.Frame(anim_frame)
+        row_b.pack(fill=tk.X, pady=2)
+        ttk.Label(row_b, text="序列B目录:", width=10).pack(side=tk.LEFT)
+        self.b_path_var = tk.StringVar()
+        self.b_path_entry = ttk.Entry(row_b, textvariable=self.b_path_var, width=50)
+        self.b_path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(row_b, text="选择目录", command=lambda: self._select_seq_dir("b")).pack(side=tk.LEFT, padx=2)
+        self.b_loop_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row_b, text="循环", variable=self.b_loop_var).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_b, text="帧时长(秒):").pack(side=tk.LEFT, padx=2)
+        self.b_dur_var = tk.StringVar(value="0.1")
+        ttk.Entry(row_b, textvariable=self.b_dur_var, width=6).pack(side=tk.LEFT, padx=2)
+        self.b_status_var = tk.StringVar(value="未加载")
+        ttk.Label(row_b, textvariable=self.b_status_var, foreground="gray", width=12).pack(side=tk.LEFT, padx=5)
+
+        # 操作按钮行
+        row_btn = ttk.Frame(anim_frame)
+        row_btn.pack(fill=tk.X, pady=3)
+        ttk.Button(row_btn, text="▶ 触发播放", command=self._trigger_ui_playback).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_btn, text="■ 停止", command=self._stop_playback).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_btn, text="测试A", command=self._test_seq_a).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_btn, text="测试B", command=self._test_seq_b).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(row_btn, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Label(row_btn, text="或通过UDP发送JSON指令").pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_btn, text="模拟指令", command=self._simulate_command).pack(side=tk.LEFT, padx=5)
 
         # ─── 主渲染区域 ───
         self.render_frame = ttk.LabelFrame(self.root, text="画面预览", padding=2)
@@ -282,6 +330,111 @@ class VideoAnimationApp:
             self._log(f"已切换背景视频: {path}")
         else:
             messagebox.showerror("错误", f"无法打开视频文件:\n{path}")
+
+    # ─── 序列帧UI操作 ───
+
+    def _select_seq_dir(self, which: str):
+        """选择序列帧目录"""
+        path = filedialog.askdirectory(title=f"选择序列{which.upper()}帧图片目录")
+        if not path:
+            return
+        if which == "a":
+            self.a_path_var.set(path)
+            # 扫描目录，显示状态
+            count = self._count_frames(path)
+            self.a_status_var.set(f"{count}帧")
+        else:
+            self.b_path_var.set(path)
+            count = self._count_frames(path)
+            self.b_status_var.set(f"{count}帧")
+
+    def _count_frames(self, path: str) -> int:
+        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
+        try:
+            files = [f for f in os.listdir(path) if os.path.splitext(f)[1].lower() in exts]
+            return len(files)
+        except:
+            return 0
+
+    def _build_trigger_json(self) -> str:
+        """从UI控件构建触发指令JSON"""
+        data = {
+            "a_path": self.a_path_var.get().strip(),
+            "a_loop": self.a_loop_var.get(),
+            "a_frame_duration": float(self.a_dur_var.get() or "0.1"),
+            "b_path": self.b_path_var.get().strip(),
+            "b_loop": self.b_loop_var.get(),
+            "b_frame_duration": float(self.b_dur_var.get() or "0.1"),
+        }
+        return json.dumps(data, ensure_ascii=False)
+
+    def _trigger_ui_playback(self):
+        """从UI触发A→B播放"""
+        a_path = self.a_path_var.get().strip()
+        b_path = self.b_path_var.get().strip()
+        if not a_path or not b_path:
+            messagebox.showwarning("提示", "请先选择序列A和序列B的目录")
+            return
+        if not os.path.isdir(a_path):
+            messagebox.showerror("错误", f"序列A目录不存在:\n{a_path}")
+            return
+        if not os.path.isdir(b_path):
+            messagebox.showerror("错误", f"序列B目录不存在:\n{b_path}")
+            return
+        cmd = self._build_trigger_json()
+        self._log(f"UI触发: {cmd}")
+        self.engine._handle_command(cmd)
+
+    def _test_seq_a(self):
+        """仅测试序列A（不触发B）"""
+        a_path = self.a_path_var.get().strip()
+        if not a_path or not os.path.isdir(a_path):
+            messagebox.showwarning("提示", "请先选择序列A目录")
+            return
+        # 构造一个仅A的指令
+        data = {
+            "a_path": a_path,
+            "a_loop": self.a_loop_var.get(),
+            "a_frame_duration": float(self.a_dur_var.get() or "0.1"),
+            "b_path": a_path,  # 临时用A充当B，但只有A会执行
+            "b_loop": False,
+            "b_frame_duration": 0.1,
+        }
+        # 修改引擎行为：只有A，B不生效
+        # 简单做法：先加载A，然后手动触发
+        from engine import AnimationConfig
+        cfg = AnimationConfig(path=a_path, loop=self.a_loop_var.get(),
+                              frame_duration=float(self.a_dur_var.get() or "0.1"))
+        ok = self.engine.animator_a.load_config(cfg)
+        if not ok:
+            messagebox.showerror("错误", "加载序列A失败")
+            return
+        self.engine.animator_a.reset()
+        self.engine.animator_b.reset()
+        self.engine.animator_a.start()
+        self.engine._active_animator = self.engine.animator_a
+        self.engine.state_machine.transition_to(PlayerState.PLAYING_A)
+        self._log(f"▶ 单独测试序列A ({a_path})")
+
+    def _test_seq_b(self):
+        """仅测试序列B"""
+        b_path = self.b_path_var.get().strip()
+        if not b_path or not os.path.isdir(b_path):
+            messagebox.showwarning("提示", "请先选择序列B目录")
+            return
+        from engine import AnimationConfig
+        cfg = AnimationConfig(path=b_path, loop=self.b_loop_var.get(),
+                              frame_duration=float(self.b_dur_var.get() or "0.1"))
+        ok = self.engine.animator_b.load_config(cfg)
+        if not ok:
+            messagebox.showerror("错误", "加载序列B失败")
+            return
+        self.engine.animator_a.reset()
+        self.engine.animator_b.reset()
+        self.engine.animator_b.start()
+        self.engine._active_animator = self.engine.animator_b
+        self.engine.state_machine.transition_to(PlayerState.PLAYING_B)
+        self._log(f"▶ 单独测试序列B ({b_path})")
 
     def _stop_playback(self):
         self.engine.stop_current()

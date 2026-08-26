@@ -90,6 +90,13 @@ class VideoAnimationApp:
 
         ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
+        self.anim_progress_var = tk.StringVar(value="")
+        self.anim_progress_label = ttk.Label(toolbar, textvariable=self.anim_progress_var,
+                                              font=("", 9), foreground="cyan")
+        self.anim_progress_label.pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
         ttk.Label(toolbar, text="UDP端口:").pack(side=tk.LEFT, padx=2)
         self.port_var = tk.StringVar(value=str(self._cfg.get("udp_port", 9999)))
         self.port_label = ttk.Label(toolbar, textvariable=self.port_var, font=("", 10, "bold"))
@@ -208,6 +215,14 @@ class VideoAnimationApp:
             # 更新引擎状态（动画帧推进）
             self.engine.update(min(dt, 0.1))
 
+            # 更新动画进度显示
+            state = self.engine.state_machine.get_state()
+            if state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B):
+                anim = self.engine.animator_a if state == PlayerState.PLAYING_A else self.engine.animator_b
+                self.anim_progress_var.set(f"{anim.current_idx+1}/{anim.total_frames}")
+            else:
+                self.anim_progress_var.set("")
+
             # 获取背景帧，无新帧时用缓存帧
             bg_frame = self.engine.video_reader.get_frame()
             if bg_frame is not None:
@@ -227,13 +242,8 @@ class VideoAnimationApp:
             self.root.after(33, self._render_loop)  # 异常后继续
 
     def _render_frame(self, bg_frame: np.ndarray):
-        """合成并显示帧"""
+        """合成并显示帧（优化版：BILINEAR缩放+缓存画布尺寸）"""
         try:
-            # OpenCV BGR → RGB → PIL
-            bg_rgb = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2RGB)
-            bg_pil = Image.fromarray(bg_rgb)
-
-            # 缩放以适应画布
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
             if cw < 10 or ch < 10:
@@ -241,21 +251,24 @@ class VideoAnimationApp:
 
             self._display_size = (cw, ch)
 
-            # 按比例缩放背景
+            # OpenCV BGR → RGB → PIL（快速转换）
+            bg_rgb = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2RGB)
+            bg_pil = Image.fromarray(bg_rgb)
+
+            # 按比例缩放背景（用BILINEAR，比LANCZOS快5-10倍，视频显示够用）
             bg_resized = self._aspect_fit(bg_pil, cw, ch)
 
             # 获取动画帧
             anim_frame = self.engine.get_current_animation_frame()
 
             if anim_frame is not None:
-                # 动画帧缩放到与背景相同尺寸
-                anim_resized = anim_frame.resize(bg_resized.size, Image.LANCZOS)
+                # 动画帧缩放到与背景相同尺寸（也用BILINEAR）
+                anim_resized = anim_frame.resize(bg_resized.size, Image.BILINEAR)
                 # 合成：动画叠加在背景上
                 if anim_resized.mode == "RGBA":
                     bg_resized = bg_resized.convert("RGBA")
                     composite = Image.alpha_composite(bg_resized, anim_resized)
                 else:
-                    # 无透明通道直接替换
                     composite = anim_resized.convert("RGBA")
                 composite = composite.convert("RGB")
             else:
@@ -272,16 +285,16 @@ class VideoAnimationApp:
                 self.canvas.itemconfig(self._canvas_image_id, image=self._bg_image)
 
         except Exception as e:
-            self._log(f"渲染异常: {e}")  # 记录错误但不阻塞
+            self._log(f"渲染异常: {e}")
 
     def _aspect_fit(self, img: Image.Image, max_w: int, max_h: int) -> Image.Image:
-        """等比例缩放"""
+        """等比例缩放（用BILINEAR，视频用足够快）"""
         w, h = img.size
         ratio = min(max_w / w, max_h / h)
         if ratio >= 1.0:
             return img
         nw, nh = int(w * ratio), int(h * ratio)
-        return img.resize((nw, nh), Image.LANCZOS)
+        return img.resize((nw, nh), Image.BILINEAR)
 
     def _on_canvas_resize(self, event):
         pass  # 渲染循环自动处理
@@ -342,19 +355,64 @@ class VideoAnimationApp:
     # ─── 序列帧UI操作 ───
 
     def _select_seq_dir(self, which: str):
-        """选择序列帧目录"""
+        """选择序列帧目录 → 自动加载并播放"""
         path = filedialog.askdirectory(title=f"选择序列{which.upper()}帧图片目录")
         if not path:
             return
         if which == "a":
             self.a_path_var.set(path)
-            # 扫描目录，显示状态
-            count = self._count_frames(path)
-            self.a_status_var.set(f"{count}帧")
+            self._load_and_play_seq_a(path)
         else:
             self.b_path_var.set(path)
-            count = self._count_frames(path)
-            self.b_status_var.set(f"{count}帧")
+            self._load_and_play_seq_b(path)
+
+    def _load_and_play_seq_a(self, path: str):
+        """加载序列A并自动播放"""
+        from engine import AnimationConfig
+        cfg = AnimationConfig(
+            path=path,
+            loop=self.a_loop_var.get(),
+            frame_duration=float(self.a_dur_var.get() or "0.1")
+        )
+        # ⚠️ 先reset再加载
+        self.engine.animator_a.reset()
+        ok = self.engine.animator_a.load_config(cfg)
+        if not ok:
+            self.a_status_var.set("加载失败")
+            self._log(f"序列A加载失败: {path}")
+            return
+        count = self.engine.animator_a.total_frames
+        self.a_status_var.set(f"{count}帧")
+        self._log(f"序列A已加载 {count} 帧: {path}")
+
+        # 自动播放：只播放A，B留空
+        self.engine.animator_b.reset()
+        self.engine.animator_a.start()
+        self.engine.state_machine.transition_to(PlayerState.PLAYING_A)
+        self._log(f"▶ 自动播放序列A ({count}帧)")
+
+    def _load_and_play_seq_b(self, path: str):
+        """加载序列B并自动播放"""
+        from engine import AnimationConfig
+        cfg = AnimationConfig(
+            path=path,
+            loop=self.b_loop_var.get(),
+            frame_duration=float(self.b_dur_var.get() or "0.1")
+        )
+        self.engine.animator_b.reset()
+        ok = self.engine.animator_b.load_config(cfg)
+        if not ok:
+            self.b_status_var.set("加载失败")
+            self._log(f"序列B加载失败: {path}")
+            return
+        count = self.engine.animator_b.total_frames
+        self.b_status_var.set(f"{count}帧")
+        self._log(f"序列B已加载 {count} 帧: {path}")
+
+        self.engine.animator_a.reset()
+        self.engine.animator_b.start()
+        self.engine.state_machine.transition_to(PlayerState.PLAYING_B)
+        self._log(f"▶ 自动播放序列B ({count}帧)")
 
     def _count_frames(self, path: str) -> int:
         exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
@@ -399,30 +457,7 @@ class VideoAnimationApp:
         if not a_path or not os.path.isdir(a_path):
             messagebox.showwarning("提示", "请先选择序列A目录")
             return
-        # 构造一个仅A的指令
-        data = {
-            "a_path": a_path,
-            "a_loop": self.a_loop_var.get(),
-            "a_frame_duration": float(self.a_dur_var.get() or "0.1"),
-            "b_path": a_path,  # 临时用A充当B，但只有A会执行
-            "b_loop": False,
-            "b_frame_duration": 0.1,
-        }
-        # 修改引擎行为：只有A，B不生效
-        # 简单做法：先加载A，然后手动触发
-        from engine import AnimationConfig
-        cfg = AnimationConfig(path=a_path, loop=self.a_loop_var.get(),
-                              frame_duration=float(self.a_dur_var.get() or "0.1"))
-        ok = self.engine.animator_a.load_config(cfg)
-        if not ok:
-            messagebox.showerror("错误", "加载序列A失败")
-            return
-        self.engine.animator_a.reset()
-        self.engine.animator_b.reset()
-        self.engine.animator_a.start()
-        self.engine._active_animator = self.engine.animator_a
-        self.engine.state_machine.transition_to(PlayerState.PLAYING_A)
-        self._log(f"▶ 单独测试序列A ({a_path})")
+        self._load_and_play_seq_a(a_path)
 
     def _test_seq_b(self):
         """仅测试序列B"""
@@ -430,19 +465,7 @@ class VideoAnimationApp:
         if not b_path or not os.path.isdir(b_path):
             messagebox.showwarning("提示", "请先选择序列B目录")
             return
-        from engine import AnimationConfig
-        cfg = AnimationConfig(path=b_path, loop=self.b_loop_var.get(),
-                              frame_duration=float(self.b_dur_var.get() or "0.1"))
-        ok = self.engine.animator_b.load_config(cfg)
-        if not ok:
-            messagebox.showerror("错误", "加载序列B失败")
-            return
-        self.engine.animator_a.reset()
-        self.engine.animator_b.reset()
-        self.engine.animator_b.start()
-        self.engine._active_animator = self.engine.animator_b
-        self.engine.state_machine.transition_to(PlayerState.PLAYING_B)
-        self._log(f"▶ 单独测试序列B ({b_path})")
+        self._load_and_play_seq_b(b_path)
 
     def _stop_playback(self):
         self.engine.stop_current()

@@ -238,6 +238,11 @@ class SequenceAnimator:
         with self._lock:
             return len(self._frames) if self._frames else 0
 
+    @property
+    def loop(self) -> bool:
+        with self._lock:
+            return self._loop
+
 
 class StateMachine:
     """状态机：空闲 → 播放A → A完成 → 播放B → B完成 → 空闲"""
@@ -386,7 +391,10 @@ class PlaybackEngine:
 
         self._log(f"加载序列A: {a_path} (loop={a_loop}), 序列B: {b_path} (loop={b_loop})")
 
-        # 加载序列帧
+        # ⚠️ 先reset清除旧状态，再加载帧（顺序不能反）
+        self.animator_a.reset()
+        self.animator_b.reset()
+
         cfg_a = AnimationConfig(path=a_path, loop=a_loop, frame_duration=a_duration)
         cfg_b = AnimationConfig(path=b_path, loop=b_loop, frame_duration=b_duration)
 
@@ -404,14 +412,12 @@ class PlaybackEngine:
         self._start_playback()
 
     def _start_playback(self):
-        """开始播放A→B序列"""
+        """开始播放A→B序列（帧已加载，只启动播放）"""
         self._waiting_for_b = False
-        self.animator_a.reset()
-        self.animator_b.reset()
         self.animator_a.start()
         self._active_animator = self.animator_a
         self.state_machine.transition_to(PlayerState.PLAYING_A)
-        self._log(f"▶ 开始播放序列A ({self.animator_a.total_frames}帧, loop={self.animator_a._loop})")
+        self._log(f"▶ 开始播放序列A ({self.animator_a.total_frames}帧, loop={self.animator_a.loop})")
 
     def update(self, dt: float):
         """每帧更新（由主循环调用）"""
@@ -425,7 +431,7 @@ class PlaybackEngine:
                 self.animator_b.start()
                 self._active_animator = self.animator_b
                 self.state_machine.transition_to(PlayerState.PLAYING_B)
-                self._log(f"▶ 开始播放序列B ({self.animator_b.total_frames}帧, loop={self.animator_b._loop})")
+                self._log(f"▶ 开始播放序列B ({self.animator_b.total_frames}帧, loop={self.animator_b.loop})")
 
         elif state == PlayerState.PLAYING_B:
             finished = self.animator_b.update(dt)

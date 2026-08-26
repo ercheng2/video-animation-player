@@ -19,7 +19,7 @@ class VideoAnimationApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("视频动画播放控制 v1.0")
-        self.root.geometry("1024x768")
+        self.root.attributes("-fullscreen", True)  # 默认全屏
         self.root.minsize(800, 600)
 
         self.engine = PlaybackEngine()
@@ -32,6 +32,7 @@ class VideoAnimationApp:
         self._bg_image: Optional[ImageTk.PhotoImage] = None
         self._anim_image: Optional[ImageTk.PhotoImage] = None
         self._display_size = (800, 600)
+        self._last_render_bg = None  # 缓存上一帧背景，用于无新帧时继续渲染
 
         # 配置路径
         self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_config.json")
@@ -199,24 +200,31 @@ class VideoAnimationApp:
     def _render_loop(self):
         if not self._render_running:
             return
+        try:
+            now = time.time()
+            dt = now - self._last_render_time
+            self._last_render_time = now
 
-        now = time.time()
-        dt = now - self._last_render_time
-        self._last_render_time = now
+            # 更新引擎状态（动画帧推进）
+            self.engine.update(min(dt, 0.1))
 
-        # 更新引擎状态
-        self.engine.update(min(dt, 0.1))  # 限制最大dt为0.1s
+            # 获取背景帧，无新帧时用缓存帧
+            bg_frame = self.engine.video_reader.get_frame()
+            if bg_frame is not None:
+                self._last_render_bg = bg_frame
+                self._render_frame(bg_frame)
+            elif self._last_render_bg is not None:
+                # 无新帧但有缓存帧，继续渲染（让动画帧能持续更新）
+                self._render_frame(self._last_render_bg)
 
-        # 获取背景帧
-        bg_frame = self.engine.video_reader.get_frame()
-        if bg_frame is not None:
-            self._render_frame(bg_frame)
+            # 计算渲染间隔（匹配视频帧率）
+            fps = self.engine.video_reader.fps
+            interval = int(1000.0 / max(fps, 15.0)) if fps > 0 else 33
 
-        # 计算渲染间隔（匹配视频帧率）
-        fps = self.engine.video_reader.fps
-        interval = int(1000.0 / max(fps, 15.0)) if fps > 0 else 33
-
-        self.root.after(interval, self._render_loop)
+            self.root.after(interval, self._render_loop)
+        except Exception as e:
+            self._log(f"渲染循环异常: {e}")
+            self.root.after(33, self._render_loop)  # 异常后继续
 
     def _render_frame(self, bg_frame: np.ndarray):
         """合成并显示帧"""
@@ -264,7 +272,7 @@ class VideoAnimationApp:
                 self.canvas.itemconfig(self._canvas_image_id, image=self._bg_image)
 
         except Exception as e:
-            pass  # 渲染异常不阻塞
+            self._log(f"渲染异常: {e}")  # 记录错误但不阻塞
 
     def _aspect_fit(self, img: Image.Image, max_w: int, max_h: int) -> Image.Image:
         """等比例缩放"""

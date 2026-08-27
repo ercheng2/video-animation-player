@@ -129,10 +129,10 @@ class BackgroundVideoReader:
 
 
 class SequenceAnimator:
-    """序列帧动画播放器"""
+    """序列帧动画播放器 - 按需加载帧，不预加载到内存"""
     def __init__(self):
         self.config: Optional[AnimationConfig] = None
-        self._frames: list = []          # 预加载的PIL Image列表
+        self._frame_files: list = []     # 文件路径列表（不加载到内存）
         self._current_idx: int = 0
         self._frame_timer: float = 0.0
         self._playing = False
@@ -140,12 +140,12 @@ class SequenceAnimator:
         self._finished = False
         self._lock = threading.Lock()
         self._last_frame: Optional[Image.Image] = None
+        self._cache: dict = {}           # 按需缓存：index -> PIL Image
 
     def load_config(self, cfg: AnimationConfig) -> bool:
-        """加载序列帧配置并预加载图片"""
+        """加载序列帧配置（只扫描目录，不加载图片到内存）"""
         if not cfg.path or not os.path.isdir(cfg.path):
             return False
-        # 扫描目录下所有图片文件
         exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
         files = sorted([
             os.path.join(cfg.path, f)
@@ -158,19 +158,26 @@ class SequenceAnimator:
         cfg.frame_files = files
         self.config = cfg
         self._loop = cfg.loop
-
-        # 预加载图片
-        self._frames = []
-        for f in files:
-            try:
-                img = Image.open(f).convert("RGBA")
-                self._frames.append(img)
-            except Exception as e:
-                print(f"[Animator] 加载图片失败 {f}: {e}")
-        if not self._frames:
-            return False
-        print(f"[Animator] 已加载 {len(self._frames)} 帧: {cfg.path}")
+        self._frame_files = files
+        self._cache = {}
+        self._last_frame = None
+        print(f"[Animator] 已扫描 {len(files)} 帧（按需加载）: {cfg.path}")
         return True
+
+    def _load_frame(self, idx: int) -> Optional[Image.Image]:
+        """按需加载指定帧（带简单缓存）"""
+        if idx < 0 or idx >= len(self._frame_files):
+            return self._last_frame
+        if idx in self._cache:
+            return self._cache[idx]
+        try:
+            img = Image.open(self._frame_files[idx]).convert("RGBA")
+            # 只缓存当前帧
+            self._cache = {idx: img}
+            return img
+        except Exception as e:
+            print(f"[Animator] 加载帧 {idx} 失败: {e}")
+            return self._last_frame
 
     def start(self):
         """开始播放"""
@@ -192,13 +199,15 @@ class SequenceAnimator:
             self._finished = False
             self._current_idx = 0
             self._frame_timer = 0.0
-            self._frames = []
+            self._frame_files = []
+            self._cache = {}
+            self._last_frame = None
             self.config = None
 
     def update(self, dt: float) -> bool:
         """更新动画状态，返回是否播放完成"""
         with self._lock:
-            if not self._playing or not self._frames:
+            if not self._playing or not self._frame_files:
                 return False
 
             self._frame_timer += dt
@@ -208,25 +217,25 @@ class SequenceAnimator:
                 self._frame_timer = 0
                 self._current_idx += 1
 
-                if self._current_idx >= len(self._frames):
+                if self._current_idx >= len(self._frame_files):
                     if self._loop:
                         self._current_idx = 0
                     else:
-                        self._current_idx = len(self._frames) - 1
+                        self._current_idx = len(self._frame_files) - 1
                         self._playing = False
                         self._finished = True
                         return True  # 播放完成
             return False
 
     def get_current_frame(self) -> Optional[Image.Image]:
-        """获取当前帧"""
+        """获取当前帧（按需加载）"""
         with self._lock:
-            if not self._frames:
+            if not self._frame_files:
                 return None
-            if self._current_idx < len(self._frames):
-                self._last_frame = self._frames[self._current_idx]
-                return self._frames[self._current_idx]
-            return self._last_frame
+            frame = self._load_frame(self._current_idx)
+            if frame is not None:
+                self._last_frame = frame
+            return frame
 
     def is_playing(self) -> bool:
         with self._lock:
@@ -244,7 +253,7 @@ class SequenceAnimator:
     @property
     def total_frames(self) -> int:
         with self._lock:
-            return len(self._frames) if self._frames else 0
+            return len(self._frame_files)
 
     @property
     def loop(self) -> bool:
@@ -699,15 +708,19 @@ class VideoAnimationApp:
 
             # 判断是否需要刷新画面
             need_render = False
+            active_state = self.engine.state_machine.get_state()
+            is_anim_playing = active_state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B)
+
             bg_frame = self.engine.video_reader.get_frame()
             if bg_frame is not None:
                 self._last_render_bg = bg_frame
                 need_render = True
-            elif self._last_render_bg is not None:
-                # 缓存帧可用：有动画播放时才持续刷新，否则不动
-                state = self.engine.state_machine.get_state()
-                if state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B):
-                    need_render = True
+            elif self._last_render_bg is not None and is_anim_playing:
+                # 有缓存背景帧 + 动画播放中 → 持续刷新
+                need_render = True
+            elif is_anim_playing:
+                # 无背景视频但有动画播放 → 黑底+动画也需要渲染
+                need_render = True
 
             if need_render:
                 self._render_frame(self._last_render_bg)
@@ -719,8 +732,8 @@ class VideoAnimationApp:
             self._log(f"渲染循环异常: {e}")
             self.root.after(30, self._render_loop)
 
-    def _render_frame(self, bg_frame: np.ndarray):
-        """渲染帧：统一用PIL渲染，确保颜色准确"""
+    def _render_frame(self, bg_frame: Optional[np.ndarray] = None):
+        """渲染帧：支持有/无背景视频两种模式"""
         try:
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
@@ -729,38 +742,52 @@ class VideoAnimationApp:
 
             self._display_size = (cw, ch)
 
-            # OpenCV缩放背景帧
-            h, w = bg_frame.shape[:2]
-            ratio = min(cw / w, ch / h)
-            if ratio < 1.0:
-                tw, th = int(w * ratio), int(h * ratio)
-                bg_resized = cv2.resize(bg_frame, (tw, th), interpolation=cv2.INTER_LINEAR)
-            else:
-                bg_resized = bg_frame
-                tw, th = w, h
-
-            # 统一用PIL渲染（BGR→RGB转换确保颜色正确）
-            bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
-            bg_pil = Image.fromarray(bg_rgb)
-
             # 获取动画帧
             anim_frame = self.engine.get_current_animation_frame()
 
-            if anim_frame is not None:
-                # 有动画 → PIL合成
-                anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
-                if anim_resized.mode == "RGBA":
-                    bg_rgba = bg_pil.convert("RGBA")
-                    composite = Image.alpha_composite(bg_rgba, anim_resized)
+            if bg_frame is not None:
+                # ── 有背景视频 ──
+                h, w = bg_frame.shape[:2]
+                ratio = min(cw / w, ch / h)
+                if ratio < 1.0:
+                    tw, th = int(w * ratio), int(h * ratio)
+                    bg_resized = cv2.resize(bg_frame, (tw, th), interpolation=cv2.INTER_LINEAR)
                 else:
-                    composite = anim_resized.convert("RGBA")
-                display_img = composite.convert("RGB")
+                    bg_resized = bg_frame
+                    tw, th = w, h
+
+                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
+                bg_pil = Image.fromarray(bg_rgb)
+
+                if anim_frame is not None:
+                    # 背景 + 动画合成
+                    anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
+                    if anim_resized.mode == "RGBA":
+                        bg_rgba = bg_pil.convert("RGBA")
+                        composite = Image.alpha_composite(bg_rgba, anim_resized)
+                    else:
+                        composite = anim_resized.convert("RGBA")
+                    display_img = composite.convert("RGB")
+                else:
+                    display_img = bg_pil
             else:
-                display_img = bg_pil
+                # ── 无背景视频 ──
+                if anim_frame is not None:
+                    # 直接在画布上居中显示动画帧
+                    aw, ah = anim_frame.size
+                    ratio = min(cw / aw, ch / ah)
+                    if ratio < 1.0:
+                        dw, dh = int(aw * ratio), int(ah * ratio)
+                        display_img = anim_frame.resize((dw, dh), Image.BILINEAR).convert("RGB")
+                    else:
+                        display_img = anim_frame.convert("RGB")
+                else:
+                    # 全黑
+                    display_img = Image.new("RGB", (cw, ch), (0, 0, 0))
 
             self._bg_image = ImageTk.PhotoImage(display_img)
 
-            # 显示
+            # 居中显示
             cx, cy = cw // 2, ch // 2
             if self._canvas_image_id is None:
                 self._canvas_image_id = self.canvas.create_image(

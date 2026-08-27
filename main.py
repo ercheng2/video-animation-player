@@ -522,6 +522,13 @@ class VideoAnimationApp:
         self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_config.json")
         self._load_config()
 
+        # 渲染缓存
+        self._last_anim_idx = -1
+        self._last_render_size = (0, 0)
+        self._cached_composite: Optional[Image.Image] = None
+        self._cached_anim_resized: Optional[Image.Image] = None
+        self._cached_anim_size = (0, 0)
+
         self._build_ui()
         self._log("程序已启动")
 
@@ -733,7 +740,7 @@ class VideoAnimationApp:
             self.root.after(30, self._render_loop)
 
     def _render_frame(self, bg_frame: Optional[np.ndarray] = None):
-        """渲染帧：支持有/无背景视频两种模式"""
+        """渲染帧：无动画用PPM直显，有动画用PIL合成（缓存结果避免重复计算）"""
         try:
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
@@ -741,9 +748,9 @@ class VideoAnimationApp:
                 return
 
             self._display_size = (cw, ch)
-
-            # 获取动画帧
             anim_frame = self.engine.get_current_animation_frame()
+            state = self.engine.state_machine.get_state()
+            is_anim = state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B)
 
             if bg_frame is not None:
                 # ── 有背景视频 ──
@@ -756,24 +763,16 @@ class VideoAnimationApp:
                     bg_resized = bg_frame
                     tw, th = w, h
 
-                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
-                bg_pil = Image.fromarray(bg_rgb)
-
-                if anim_frame is not None:
-                    # 背景 + 动画合成
-                    anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
-                    if anim_resized.mode == "RGBA":
-                        bg_rgba = bg_pil.convert("RGBA")
-                        composite = Image.alpha_composite(bg_rgba, anim_resized)
-                    else:
-                        composite = anim_resized.convert("RGBA")
-                    display_img = composite.convert("RGB")
+                if is_anim and anim_frame is not None:
+                    # 有动画 → PIL合成（缓存合成结果，避免每帧重复）
+                    self._render_with_anim(bg_resized, anim_frame, tw, th)
                 else:
-                    display_img = bg_pil
+                    # 无动画 → PPM直显（OpenCV自动BGR→RGB，颜色正确且速度快）
+                    _, encoded = cv2.imencode('.ppm', bg_resized)
+                    self._bg_image = tk.PhotoImage(data=encoded.tobytes())
             else:
                 # ── 无背景视频 ──
-                if anim_frame is not None:
-                    # 直接在画布上居中显示动画帧
+                if is_anim and anim_frame is not None:
                     aw, ah = anim_frame.size
                     ratio = min(cw / aw, ch / ah)
                     if ratio < 1.0:
@@ -781,11 +780,13 @@ class VideoAnimationApp:
                         display_img = anim_frame.resize((dw, dh), Image.BILINEAR).convert("RGB")
                     else:
                         display_img = anim_frame.convert("RGB")
+                    self._bg_image = ImageTk.PhotoImage(display_img)
                 else:
                     # 全黑
-                    display_img = Image.new("RGB", (cw, ch), (0, 0, 0))
-
-            self._bg_image = ImageTk.PhotoImage(display_img)
+                    if self._canvas_image_id is not None:
+                        self.canvas.delete(self._canvas_image_id)
+                        self._canvas_image_id = None
+                    return
 
             # 居中显示
             cx, cy = cw // 2, ch // 2
@@ -798,6 +799,45 @@ class VideoAnimationApp:
 
         except Exception as e:
             self._log(f"渲染异常: {e}")
+
+    def _render_with_anim(self, bg_resized: np.ndarray, anim_frame: Image.Image, tw: int, th: int):
+        """PIL合成动画帧（缓存结果，仅动画帧变化或画布大小变化时重算）"""
+        # 取当前动画帧索引
+        state = self.engine.state_machine.get_state()
+        if state == PlayerState.PLAYING_A:
+            anim_idx = self.engine.animator_a.current_idx
+        else:
+            anim_idx = self.engine.animator_b.current_idx
+
+        cache_key = (anim_idx, tw, th)
+
+        # 检查缓存是否命中
+        if (cache_key == (self._last_anim_idx, self._last_render_size[0], self._last_render_size[1])
+                and self._cached_composite is not None):
+            self._bg_image = ImageTk.PhotoImage(self._cached_composite)
+            return
+
+        # 缓存未命中 → 重新合成
+        bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
+        bg_pil = Image.fromarray(bg_rgb)
+
+        # 缩放动画帧到目标尺寸
+        anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
+
+        if anim_resized.mode == "RGBA":
+            bg_rgba = bg_pil.convert("RGBA")
+            composite = Image.alpha_composite(bg_rgba, anim_resized)
+        else:
+            composite = anim_resized.convert("RGBA")
+
+        display_img = composite.convert("RGB")
+
+        # 更新缓存
+        self._last_anim_idx = anim_idx
+        self._last_render_size = (tw, th)
+        self._cached_composite = display_img
+
+        self._bg_image = ImageTk.PhotoImage(display_img)
 
     def _on_canvas_resize(self, event):
         pass

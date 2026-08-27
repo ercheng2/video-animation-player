@@ -23,9 +23,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller opencv-python pillow numpy
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (spec file)
         run: |
-          pyinstaller --onefile --windowed --name VideoAnimationPlayer --hidden-import cv2 --hidden-import PIL --hidden-import PIL._tkinter_finder --hidden-import numpy --hidden-import player_app --hidden-import engine main.py
+          pyinstaller --clean VideoAnimationPlayer.spec
+
+      - name: Verify built exe
+        run: |
+          dir dist\VideoAnimationPlayer.exe
+          python -c "
+import subprocess, os
+# 检查exe是否存在且大于10MB
+size = os.path.getsize('dist\\VideoAnimationPlayer.exe')
+print(f'EXE size: {size} bytes ({size/1024/1024:.1f} MB)')
+assert size > 10*1024*1024, 'EXE too small, something wrong'
+print('EXE size check passed')
+"
 
       - name: Create Release ZIP
         run: |

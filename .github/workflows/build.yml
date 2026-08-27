@@ -23,8 +23,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller opencv-python pillow numpy
 
+      - name: Verify modules can be imported
+        run: |
+          python -c "import sys; sys.path.insert(0, '.'); from player_app import VideoAnimationApp; print('player_app OK')"
+          python -c "import sys; sys.path.insert(0, '.'); from engine import PlaybackEngine; print('engine OK')"
+
       - name: Build with PyInstaller
-        run: pyinstaller --clean VideoAnimationPlayer.spec
+        run: |
+          pyinstaller --onefile --windowed --name VideoAnimationPlayer --paths . --hidden-import cv2 --hidden-import PIL --hidden-import PIL._tkinter_finder --hidden-import numpy --hidden-import player_app --hidden-import engine main.py
 
       - name: Create Release ZIP
         shell: powershell

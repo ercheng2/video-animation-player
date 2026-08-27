@@ -945,6 +945,8 @@ class VideoAnimationApp:
         self.engine.animator_b.reset()
         self.engine.animator_a.start()
         self.engine.state_machine.transition_to(PlayerState.PLAYING_A)
+        self._start_rendering()
+        self.status_info.config(text=f"▶ 播放序列A | 无背景视频")
         self._log(f"▶ 自动播放序列A ({count}帧)")
 
     def _load_and_play_seq_b(self, path: str):
@@ -967,6 +969,8 @@ class VideoAnimationApp:
         self.engine.animator_a.reset()
         self.engine.animator_b.start()
         self.engine.state_machine.transition_to(PlayerState.PLAYING_B)
+        self._start_rendering()
+        self.status_info.config(text=f"▶ 播放序列B | 无背景视频")
         self._log(f"▶ 自动播放序列B ({count}帧)")
 
     def _build_trigger_json(self) -> str:
@@ -995,6 +999,8 @@ class VideoAnimationApp:
         cmd = self._build_trigger_json()
         self._log(f"UI触发: {cmd}")
         self.engine._handle_command(cmd)
+        self._start_rendering()
+        self.status_info.config(text="▶ A→B顺序播放 | 无背景视频")
 
     def _test_seq_a(self):
         a_path = self.a_path_var.get().strip()

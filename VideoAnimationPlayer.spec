@@ -1,8 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+
+spec_dir = os.path.dirname(os.path.abspath(__file__))
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
+    pathex=[spec_dir],
     binaries=[],
     datas=[],
     hiddenimports=[

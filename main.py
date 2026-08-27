@@ -697,22 +697,30 @@ class VideoAnimationApp:
             else:
                 self.anim_progress_var.set("")
 
-            # 获取背景帧，无新帧时用缓存帧
+            # 判断是否需要刷新画面
+            need_render = False
             bg_frame = self.engine.video_reader.get_frame()
             if bg_frame is not None:
                 self._last_render_bg = bg_frame
-                self._render_frame(bg_frame)
+                need_render = True
             elif self._last_render_bg is not None:
+                # 缓存帧可用：有动画播放时才持续刷新，否则不动
+                state = self.engine.state_machine.get_state()
+                if state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B):
+                    need_render = True
+
+            if need_render:
                 self._render_frame(self._last_render_bg)
 
-            # 固定16ms间隔（~60fps上限），渲染多快就跑多快
-            self.root.after(16, self._render_loop)
+            # 动画播放时高频刷新（30fps），空闲时低频（10fps）省资源
+            idle = self.engine.state_machine.get_state() == PlayerState.IDLE
+            self.root.after(30 if not idle else 100, self._render_loop)
         except Exception as e:
             self._log(f"渲染循环异常: {e}")
-            self.root.after(16, self._render_loop)
+            self.root.after(30, self._render_loop)
 
     def _render_frame(self, bg_frame: np.ndarray):
-        """高性能渲染：OpenCV缩放 + PPM直显（无动画时绕过PIL）"""
+        """渲染帧：统一用PIL渲染，确保颜色准确"""
         try:
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
@@ -721,7 +729,7 @@ class VideoAnimationApp:
 
             self._display_size = (cw, ch)
 
-            # 用OpenCV缩放（比PIL快5-10倍）
+            # OpenCV缩放背景帧
             h, w = bg_frame.shape[:2]
             ratio = min(cw / w, ch / h)
             if ratio < 1.0:
@@ -731,26 +739,26 @@ class VideoAnimationApp:
                 bg_resized = bg_frame
                 tw, th = w, h
 
+            # 统一用PIL渲染（BGR→RGB转换确保颜色正确）
+            bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
+            bg_pil = Image.fromarray(bg_rgb)
+
             # 获取动画帧
             anim_frame = self.engine.get_current_animation_frame()
 
             if anim_frame is not None:
-                # 有动画 → 用PIL合成
-                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
-                bg_pil = Image.fromarray(bg_rgb)
+                # 有动画 → PIL合成
                 anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
                 if anim_resized.mode == "RGBA":
                     bg_rgba = bg_pil.convert("RGBA")
                     composite = Image.alpha_composite(bg_rgba, anim_resized)
                 else:
                     composite = anim_resized.convert("RGBA")
-                composite = composite.convert("RGB")
-                self._bg_image = ImageTk.PhotoImage(composite)
+                display_img = composite.convert("RGB")
             else:
-                # 无动画 → 用PPM直显（完全绕过PIL，性能提升巨大）
-                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
-                _, encoded = cv2.imencode('.ppm', bg_rgb)
-                self._bg_image = tk.PhotoImage(data=encoded.tobytes())
+                display_img = bg_pil
+
+            self._bg_image = ImageTk.PhotoImage(display_img)
 
             # 显示
             cx, cy = cw // 2, ch // 2

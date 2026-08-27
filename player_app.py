@@ -1,4 +1,4 @@
-"""Video Animation Player - 主窗口与渲染"""
+"""Video Animation Player - 主窗口与渲染（v2 - 高性能渲染版）"""
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
@@ -19,7 +19,7 @@ class VideoAnimationApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("视频动画播放控制 v1.0")
-        self.root.attributes("-fullscreen", True)  # 默认全屏
+        self.root.attributes("-fullscreen", True)
         self.root.minsize(800, 600)
 
         self.engine = PlaybackEngine()
@@ -30,9 +30,8 @@ class VideoAnimationApp:
         self._render_running = False
         self._last_render_time = time.time()
         self._bg_image: Optional[ImageTk.PhotoImage] = None
-        self._anim_image: Optional[ImageTk.PhotoImage] = None
         self._display_size = (800, 600)
-        self._last_render_bg = None  # 缓存上一帧背景，用于无新帧时继续渲染
+        self._last_render_bg = None
 
         # 配置路径
         self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_config.json")
@@ -41,7 +40,6 @@ class VideoAnimationApp:
         self._build_ui()
         self._log("程序已启动")
 
-        # 关闭处理
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ─── UI ───
@@ -114,11 +112,11 @@ class VideoAnimationApp:
         # 序列A
         row_a = ttk.Frame(anim_frame)
         row_a.pack(fill=tk.X, pady=2)
-        ttk.Label(row_a, text="序列A目录:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row_a, text="序列A", width=6).pack(side=tk.LEFT)
         self.a_path_var = tk.StringVar()
         self.a_path_entry = ttk.Entry(row_a, textvariable=self.a_path_var, width=50)
         self.a_path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(row_a, text="选择目录", command=lambda: self._select_seq_dir("a")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_a, text="选帧文件", command=lambda: self._select_seq_file("a")).pack(side=tk.LEFT, padx=2)
         self.a_loop_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row_a, text="循环", variable=self.a_loop_var).pack(side=tk.LEFT, padx=5)
         ttk.Label(row_a, text="帧时长(秒):").pack(side=tk.LEFT, padx=2)
@@ -126,15 +124,17 @@ class VideoAnimationApp:
         ttk.Entry(row_a, textvariable=self.a_dur_var, width=6).pack(side=tk.LEFT, padx=2)
         self.a_status_var = tk.StringVar(value="未加载")
         ttk.Label(row_a, textvariable=self.a_status_var, foreground="gray", width=12).pack(side=tk.LEFT, padx=5)
+        self.a_btn_test = ttk.Button(row_a, text="▶ 播放", command=self._test_seq_a, width=6)
+        self.a_btn_test.pack(side=tk.LEFT, padx=2)
 
         # 序列B
         row_b = ttk.Frame(anim_frame)
         row_b.pack(fill=tk.X, pady=2)
-        ttk.Label(row_b, text="序列B目录:", width=10).pack(side=tk.LEFT)
+        ttk.Label(row_b, text="序列B", width=6).pack(side=tk.LEFT)
         self.b_path_var = tk.StringVar()
         self.b_path_entry = ttk.Entry(row_b, textvariable=self.b_path_var, width=50)
         self.b_path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(row_b, text="选择目录", command=lambda: self._select_seq_dir("b")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row_b, text="选帧文件", command=lambda: self._select_seq_file("b")).pack(side=tk.LEFT, padx=2)
         self.b_loop_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row_b, text="循环", variable=self.b_loop_var).pack(side=tk.LEFT, padx=5)
         ttk.Label(row_b, text="帧时长(秒):").pack(side=tk.LEFT, padx=2)
@@ -142,14 +142,14 @@ class VideoAnimationApp:
         ttk.Entry(row_b, textvariable=self.b_dur_var, width=6).pack(side=tk.LEFT, padx=2)
         self.b_status_var = tk.StringVar(value="未加载")
         ttk.Label(row_b, textvariable=self.b_status_var, foreground="gray", width=12).pack(side=tk.LEFT, padx=5)
+        self.b_btn_test = ttk.Button(row_b, text="▶ 播放", command=self._test_seq_b, width=6)
+        self.b_btn_test.pack(side=tk.LEFT, padx=2)
 
         # 操作按钮行
         row_btn = ttk.Frame(anim_frame)
         row_btn.pack(fill=tk.X, pady=3)
-        ttk.Button(row_btn, text="▶ 触发播放", command=self._trigger_ui_playback).pack(side=tk.LEFT, padx=5)
+        ttk.Button(row_btn, text="▶ A→B顺序播放", command=self._trigger_ui_playback).pack(side=tk.LEFT, padx=5)
         ttk.Button(row_btn, text="■ 停止", command=self._stop_playback).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row_btn, text="测试A", command=self._test_seq_a).pack(side=tk.LEFT, padx=5)
-        ttk.Button(row_btn, text="测试B", command=self._test_seq_b).pack(side=tk.LEFT, padx=5)
         ttk.Separator(row_btn, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
         ttk.Label(row_btn, text="或通过UDP发送JSON指令").pack(side=tk.LEFT, padx=2)
         ttk.Button(row_btn, text="模拟指令", command=self._simulate_command).pack(side=tk.LEFT, padx=5)
@@ -162,7 +162,6 @@ class VideoAnimationApp:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
 
-        # 渲染用的占位
         self._canvas_image_id = None
 
         # ─── 底部日志面板 ───
@@ -182,7 +181,6 @@ class VideoAnimationApp:
         self.status_info = ttk.Label(status_bar, text="就绪 | 等待选择背景视频并启动")
         self.status_info.pack(side=tk.LEFT, padx=5)
 
-        # 如果有配置的视频路径，自动启动
         if self._cfg.get("video_path") and os.path.exists(self._cfg.get("video_path", "")):
             self.root.after(500, self._auto_start)
 
@@ -195,7 +193,7 @@ class VideoAnimationApp:
         else:
             self._log(f"自动启动失败，视频路径无效: {vpath}")
 
-    # ─── 渲染循环 ───
+    # ─── 高性能渲染循环 ───
 
     def _start_rendering(self):
         if self._render_running:
@@ -229,20 +227,16 @@ class VideoAnimationApp:
                 self._last_render_bg = bg_frame
                 self._render_frame(bg_frame)
             elif self._last_render_bg is not None:
-                # 无新帧但有缓存帧，继续渲染（让动画帧能持续更新）
                 self._render_frame(self._last_render_bg)
 
-            # 计算渲染间隔（匹配视频帧率）
-            fps = self.engine.video_reader.fps
-            interval = int(1000.0 / max(fps, 15.0)) if fps > 0 else 33
-
-            self.root.after(interval, self._render_loop)
+            # 固定16ms间隔（~60fps上限），渲染多快就跑多快
+            self.root.after(16, self._render_loop)
         except Exception as e:
             self._log(f"渲染循环异常: {e}")
-            self.root.after(33, self._render_loop)  # 异常后继续
+            self.root.after(16, self._render_loop)
 
     def _render_frame(self, bg_frame: np.ndarray):
-        """合成并显示帧（优化版：BILINEAR缩放+缓存画布尺寸）"""
+        """高性能渲染：OpenCV缩放 + PPM直显（无动画时绕过PIL）"""
         try:
             cw = self.canvas.winfo_width()
             ch = self.canvas.winfo_height()
@@ -251,35 +245,42 @@ class VideoAnimationApp:
 
             self._display_size = (cw, ch)
 
-            # OpenCV BGR → RGB → PIL（快速转换）
-            bg_rgb = cv2.cvtColor(bg_frame, cv2.COLOR_BGR2RGB)
-            bg_pil = Image.fromarray(bg_rgb)
-
-            # 按比例缩放背景（用BILINEAR，比LANCZOS快5-10倍，视频显示够用）
-            bg_resized = self._aspect_fit(bg_pil, cw, ch)
+            # 用OpenCV缩放（比PIL快5-10倍）
+            h, w = bg_frame.shape[:2]
+            ratio = min(cw / w, ch / h)
+            if ratio < 1.0:
+                tw, th = int(w * ratio), int(h * ratio)
+                bg_resized = cv2.resize(bg_frame, (tw, th), interpolation=cv2.INTER_LINEAR)
+            else:
+                bg_resized = bg_frame
+                tw, th = w, h
 
             # 获取动画帧
             anim_frame = self.engine.get_current_animation_frame()
 
             if anim_frame is not None:
-                # 动画帧缩放到与背景相同尺寸（也用BILINEAR）
-                anim_resized = anim_frame.resize(bg_resized.size, Image.BILINEAR)
-                # 合成：动画叠加在背景上
+                # 有动画 → 用PIL合成
+                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
+                bg_pil = Image.fromarray(bg_rgb)
+                anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
                 if anim_resized.mode == "RGBA":
-                    bg_resized = bg_resized.convert("RGBA")
-                    composite = Image.alpha_composite(bg_resized, anim_resized)
+                    bg_rgba = bg_pil.convert("RGBA")
+                    composite = Image.alpha_composite(bg_rgba, anim_resized)
                 else:
                     composite = anim_resized.convert("RGBA")
                 composite = composite.convert("RGB")
+                self._bg_image = ImageTk.PhotoImage(composite)
             else:
-                composite = bg_resized
+                # 无动画 → 用PPM直显（完全绕过PIL，性能提升巨大）
+                bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
+                _, encoded = cv2.imencode('.ppm', bg_rgb)
+                self._bg_image = tk.PhotoImage(data=encoded.tobytes())
 
             # 显示
-            self._bg_image = ImageTk.PhotoImage(composite)
-
+            cx, cy = cw // 2, ch // 2
             if self._canvas_image_id is None:
                 self._canvas_image_id = self.canvas.create_image(
-                    cw // 2, ch // 2, image=self._bg_image, anchor=tk.CENTER
+                    cx, cy, image=self._bg_image, anchor=tk.CENTER
                 )
             else:
                 self.canvas.itemconfig(self._canvas_image_id, image=self._bg_image)
@@ -287,17 +288,8 @@ class VideoAnimationApp:
         except Exception as e:
             self._log(f"渲染异常: {e}")
 
-    def _aspect_fit(self, img: Image.Image, max_w: int, max_h: int) -> Image.Image:
-        """等比例缩放（用BILINEAR，视频用足够快）"""
-        w, h = img.size
-        ratio = min(max_w / w, max_h / h)
-        if ratio >= 1.0:
-            return img
-        nw, nh = int(w * ratio), int(h * ratio)
-        return img.resize((nw, nh), Image.BILINEAR)
-
     def _on_canvas_resize(self, event):
-        pass  # 渲染循环自动处理
+        pass
 
     # ─── 状态回调 ───
 
@@ -341,7 +333,6 @@ class VideoAnimationApp:
         self.video_path_var.set(os.path.basename(path))
         self._save_config()
 
-        # 重启引擎
         self.engine.shutdown()
         self._render_running = False
 
@@ -352,10 +343,27 @@ class VideoAnimationApp:
         else:
             messagebox.showerror("错误", f"无法打开视频文件:\n{path}")
 
-    # ─── 序列帧UI操作 ───
+    # ─── 序列帧：选文件自动识别文件夹 ───
+
+    def _select_seq_file(self, which: str):
+        """选一张序列帧图片 → 自动识别文件夹 + 加载全部帧并播放"""
+        path = filedialog.askopenfilename(
+            title=f"选择序列{which.upper()}中的任意一张帧图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        # 提取文件夹路径
+        folder = os.path.dirname(path)
+        if which == "a":
+            self.a_path_var.set(folder)
+            self._load_and_play_seq_a(folder)
+        else:
+            self.b_path_var.set(folder)
+            self._load_and_play_seq_b(folder)
 
     def _select_seq_dir(self, which: str):
-        """选择序列帧目录 → 自动加载并播放"""
+        """备选：选文件夹方式"""
         path = filedialog.askdirectory(title=f"选择序列{which.upper()}帧图片目录")
         if not path:
             return
@@ -374,7 +382,6 @@ class VideoAnimationApp:
             loop=self.a_loop_var.get(),
             frame_duration=float(self.a_dur_var.get() or "0.1")
         )
-        # ⚠️ 先reset再加载
         self.engine.animator_a.reset()
         ok = self.engine.animator_a.load_config(cfg)
         if not ok:
@@ -385,7 +392,6 @@ class VideoAnimationApp:
         self.a_status_var.set(f"{count}帧")
         self._log(f"序列A已加载 {count} 帧: {path}")
 
-        # 自动播放：只播放A，B留空
         self.engine.animator_b.reset()
         self.engine.animator_a.start()
         self.engine.state_machine.transition_to(PlayerState.PLAYING_A)
@@ -414,16 +420,7 @@ class VideoAnimationApp:
         self.engine.state_machine.transition_to(PlayerState.PLAYING_B)
         self._log(f"▶ 自动播放序列B ({count}帧)")
 
-    def _count_frames(self, path: str) -> int:
-        exts = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
-        try:
-            files = [f for f in os.listdir(path) if os.path.splitext(f)[1].lower() in exts]
-            return len(files)
-        except:
-            return 0
-
     def _build_trigger_json(self) -> str:
-        """从UI控件构建触发指令JSON"""
         data = {
             "a_path": self.a_path_var.get().strip(),
             "a_loop": self.a_loop_var.get(),
@@ -435,7 +432,6 @@ class VideoAnimationApp:
         return json.dumps(data, ensure_ascii=False)
 
     def _trigger_ui_playback(self):
-        """从UI触发A→B播放"""
         a_path = self.a_path_var.get().strip()
         b_path = self.b_path_var.get().strip()
         if not a_path or not b_path:
@@ -452,18 +448,16 @@ class VideoAnimationApp:
         self.engine._handle_command(cmd)
 
     def _test_seq_a(self):
-        """仅测试序列A（不触发B）"""
         a_path = self.a_path_var.get().strip()
         if not a_path or not os.path.isdir(a_path):
-            messagebox.showwarning("提示", "请先选择序列A目录")
+            messagebox.showwarning("提示", "请先选择序列A目录（点"选帧文件"选一张图）")
             return
         self._load_and_play_seq_a(a_path)
 
     def _test_seq_b(self):
-        """仅测试序列B"""
         b_path = self.b_path_var.get().strip()
         if not b_path or not os.path.isdir(b_path):
-            messagebox.showwarning("提示", "请先选择序列B目录")
+            messagebox.showwarning("提示", "请先选择序列B目录（点"选帧文件"选一张图）")
             return
         self._load_and_play_seq_b(b_path)
 
@@ -475,7 +469,6 @@ class VideoAnimationApp:
         self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
 
     def _simulate_command(self):
-        """模拟发送UDP指令对话框"""
         dialog = SimulateDialog(self.root)
         if dialog.result:
             self.engine._handle_command(dialog.result)
@@ -507,8 +500,6 @@ class VideoAnimationApp:
                 json.dump(self._cfg, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self._log(f"保存配置失败: {e}")
-
-    # ─── 关闭 ───
 
     def _on_close(self):
         self._render_running = False

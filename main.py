@@ -491,12 +491,6 @@ class PlaybackEngine:
         self.animator_b.reset()
 
 
-from engine import (
-    PlaybackEngine, PlayerState, BackgroundVideoReader,
-    SequenceAnimator, AnimationConfig, CommandHandler
-)
-
-
 class VideoAnimationApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -858,7 +852,6 @@ class VideoAnimationApp:
 
     def _load_and_play_seq_a(self, path: str):
         """加载序列A并自动播放"""
-        from engine import AnimationConfig
         cfg = AnimationConfig(
             path=path,
             loop=self.a_loop_var.get(),
@@ -881,7 +874,6 @@ class VideoAnimationApp:
 
     def _load_and_play_seq_b(self, path: str):
         """加载序列B并自动播放"""
-        from engine import AnimationConfig
         cfg = AnimationConfig(
             path=path,
             loop=self.b_loop_var.get(),

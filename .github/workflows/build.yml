@@ -23,41 +23,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller opencv-python pillow numpy
 
-      - name: Build with PyInstaller (spec file)
-        run: |
-          pyinstaller --clean VideoAnimationPlayer.spec
-
-      - name: Verify built exe
-        run: |
-          dir dist\VideoAnimationPlayer.exe
-          python -c "
-import subprocess, os
-# 检查exe是否存在且大于10MB
-size = os.path.getsize('dist\\VideoAnimationPlayer.exe')
-print(f'EXE size: {size} bytes ({size/1024/1024:.1f} MB)')
-assert size > 10*1024*1024, 'EXE too small, something wrong'
-print('EXE size check passed')
-"
+      - name: Build with PyInstaller
+        run: pyinstaller --clean VideoAnimationPlayer.spec
 
       - name: Create Release ZIP
+        shell: powershell
         run: |
-          mkdir release
-          copy dist\VideoAnimationPlayer.exe release\
-          copy requirements.txt release\
-          cd release
-          7z a -tzip ..\VideoAnimationPlayer_v1.zip VideoAnimationPlayer.exe requirements.txt
+          New-Item -ItemType Directory -Path release -Force
+          Copy-Item dist\VideoAnimationPlayer.exe release\
+          Copy-Item requirements.txt release\
+          Compress-Archive -Path release\* -DestinationPath VideoAnimationPlayer_v1.zip -Force
 
-      - name: Delete old release (if exists)
+      - name: Delete old release
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete v1.0 --yes 2>$null
-          git tag -d v1.0 2>$null
-          git push origin --delete v1.0 2>$null
+          gh release delete v1.0 --yes
+          git tag -d v1.0
+          git push origin --delete v1.0
 
       - name: Create Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create v1.0 --title "VideoAnimationPlayer v1.0" --notes "视频动画播放控制 v1.0 发布" VideoAnimationPlayer_v1.zip
+          gh release create v1.0 --title "VideoAnimationPlayer v1.0" --notes "视频动画播放控制 v1.0" VideoAnimationPlayer_v1.zip

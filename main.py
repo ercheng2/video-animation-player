@@ -13,6 +13,11 @@ import threading
 import time
 import queue
 import re
+
+# 最大内部渲染分辨率（降低此值可大幅提升性能，减少IO和计算压力）
+# 原始素材3840x1620，USB盘IO瓶颈下缩小到1280级可显著改善流畅度
+MAX_RENDER_WIDTH = 1280
+MAX_RENDER_HEIGHT = 720
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Callable
@@ -103,11 +108,13 @@ class BackgroundVideoReader:
                         # 循环播放
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
-                    # 在读取线程中缩小到1/2尺寸：
+                    # 在读取线程中缩小到目标渲染尺寸：
                     # 1) 减少队列内存占用 2) 降低主线程渲染负担 3) 减少IO竞争
                     h, w = frame.shape[:2]
-                    if w > 1920 or h > 1080:
-                        frame = cv2.resize(frame, (w // 2, h // 2),
+                    if w > MAX_RENDER_WIDTH or h > MAX_RENDER_HEIGHT:
+                        ratio = min(MAX_RENDER_WIDTH / w, MAX_RENDER_HEIGHT / h, 1.0)
+                        nw, nh = int(w * ratio), int(h * ratio)
+                        frame = cv2.resize(frame, (nw, nh),
                                            interpolation=cv2.INTER_LINEAR)
                     with self._lock:
                         self._latest_frame = frame.copy()
@@ -153,7 +160,7 @@ class SequenceAnimator:
         self._lock = threading.Lock()
         self._last_frame: Optional[Image.Image] = None
         self._cache: dict = {}           # 多帧缓存：index -> PIL Image
-        self._cache_max = 10             # 最多缓存10帧
+        self._cache_max = 20             # 最多缓存20帧（USB盘IO慢，扩大缓存减少IO等待）
 
     def _load_frame(self, idx: int) -> Optional[Image.Image]:
         """按需加载指定帧（多帧缓存 + 后台预加载）"""
@@ -186,10 +193,12 @@ class SequenceAnimator:
         img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_UNCHANGED)
         if img_bgra is None:
             return None
-        # 手动缩小到 1/2 分辨率以提升后续渲染性能
+        # 缩小到目标渲染分辨率以提升性能
         h, w = img_bgra.shape[:2]
-        if w > 1920 or h > 1080:
-            img_bgra = cv2.resize(img_bgra, (w // 2, h // 2),
+        if w > MAX_RENDER_WIDTH or h > MAX_RENDER_HEIGHT:
+            ratio = min(MAX_RENDER_WIDTH / w, MAX_RENDER_HEIGHT / h, 1.0)
+            nw, nh = int(w * ratio), int(h * ratio)
+            img_bgra = cv2.resize(img_bgra, (nw, nh),
                                   interpolation=cv2.INTER_LINEAR)
         # 保留 alpha 通道（支持透明 PNG 序列帧）
         if len(img_bgra.shape) == 3 and img_bgra.shape[2] == 4:
@@ -203,9 +212,9 @@ class SequenceAnimator:
             return Image.fromarray(img_rgb, mode='RGB')
 
     def _prefetch_async(self, current_idx: int):
-        """后台线程预加载后续3帧（消除帧切换时的IO等待）"""
+        """后台线程预加载后续5帧（消除帧切换时的IO等待，USB盘慢时加大预加载量）"""
         def _prefetch():
-            for offset in range(1, 4):
+            for offset in range(1, 6):
                 nidx = current_idx + offset
                 if nidx >= len(self._frame_files):
                     if self._loop:
@@ -591,6 +600,9 @@ class VideoAnimationApp:
         self._bg_image: Optional[ImageTk.PhotoImage] = None
         self._display_size = (800, 600)
         self._last_render_bg = None
+        # 帧率统计
+        self._fps_times = []
+        self._fps_display = tk.StringVar(value="-- FPS")
 
         # 配置路径
         self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_config.json")
@@ -671,6 +683,11 @@ class VideoAnimationApp:
 
         ttk.Button(toolbar, text="全屏", command=self._toggle_fullscreen).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="停止", command=self._stop_playback).pack(side=tk.LEFT, padx=2)
+
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        self.fps_label = ttk.Label(toolbar, textvariable=self._fps_display,
+                                    font=("Consolas", 10, "bold"), foreground="lime")
+        self.fps_label.pack(side=tk.LEFT, padx=5)
 
         # ─── 序列帧动画配置面板 ───
         anim_frame = ttk.LabelFrame(self.root, text="序列帧动画配置", padding=5)
@@ -789,6 +806,14 @@ class VideoAnimationApp:
             dt = now - self._last_render_time
             self._last_render_time = now
 
+            # 帧率统计（每半秒更新一次显示）
+            self._fps_times.append(now)
+            while len(self._fps_times) > 0 and self._fps_times[0] < now - 1.0:
+                self._fps_times.pop(0)
+            if len(self._fps_times) > 0:
+                fps = len(self._fps_times) / (self._fps_times[-1] - self._fps_times[0])
+                self._fps_display.set(f"{fps:.1f} FPS")
+
             # 更新引擎状态（动画帧推进）
             self.engine.update(min(dt, 0.1))
 
@@ -847,8 +872,8 @@ class VideoAnimationApp:
             if bg_frame is not None:
                 # ── 有背景视频 ──
                 h, w = bg_frame.shape[:2]
-                # 限制最大渲染尺寸不超过 1920x1080，避免大图 PIL 操作卡死主循环
-                max_w, max_h = min(cw, 1920), min(ch, 1080)
+                # 限制最大渲染尺寸，避免大图 PIL 操作卡死主循环
+                max_w, max_h = min(cw, MAX_RENDER_WIDTH), min(ch, MAX_RENDER_HEIGHT)
                 ratio = min(max_w / w, max_h / h, 1.0)
                 tw, th = int(w * ratio), int(h * ratio)
                 if ratio < 1.0:

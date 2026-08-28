@@ -57,7 +57,7 @@ class BackgroundVideoReader:
         self._video_path: str = ""
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._frame_queue: queue.Queue = queue.Queue(maxsize=3)
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=5)
         self._latest_frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
         self.fps: float = 30.0
@@ -102,6 +102,9 @@ class BackgroundVideoReader:
                 if not cap.isOpened():
                     time.sleep(1)
                     continue
+                # 尝试设置视频读取分辨率，减少底层IO量（部分编码器支持）
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, MAX_RENDER_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, MAX_RENDER_HEIGHT)
                 while self._running:
                     ret, frame = cap.read()
                     if not ret:
@@ -163,29 +166,38 @@ class SequenceAnimator:
         self._cache_max = 20             # 最多缓存20帧（USB盘IO慢，扩大缓存减少IO等待）
 
     def _load_frame(self, idx: int) -> Optional[Image.Image]:
-        """按需加载指定帧（多帧缓存 + 后台预加载）"""
+        """按需加载指定帧（多帧缓存 + 后台预加载）
+        缓存未命中时不阻塞主线程，立即返回上一帧，后台异步加载当前帧
+        """
         if idx < 0 or idx >= len(self._frame_files):
             return self._last_frame
         if idx in self._cache:
             return self._cache[idx]
-        try:
-            img = self._decode_frame(idx)
-            if img is None:
-                return self._last_frame
-            self._cache[idx] = img
-            # 控制缓存大小
-            while len(self._cache) > self._cache_max:
-                oldest = min(self._cache.keys())
-                if oldest != idx:  # 保留当前帧
-                    del self._cache[oldest]
-                else:
-                    break
-            # 后台线程预加载后续帧（不阻塞主线程）
-            self._prefetch_async(idx)
-            return img
-        except Exception as e:
-            print(f"[Animator] 加载帧 {idx} 失败: {e}")
-            return self._last_frame
+        # 缓存未命中 → 立即返回上一帧，后台异步加载，不阻塞渲染循环
+        self._load_frame_async(idx)
+        return self._last_frame
+
+    def _load_frame_async(self, idx: int):
+        """后台异步加载指定帧（不阻塞主线程）"""
+        def _load():
+            try:
+                img = self._decode_frame(idx)
+                if img is None:
+                    return
+                with self._lock:
+                    self._cache[idx] = img
+                    # 控制缓存大小
+                    while len(self._cache) > self._cache_max:
+                        oldest = min(self._cache.keys())
+                        if oldest != idx:
+                            del self._cache[oldest]
+                        else:
+                            break
+                    # 后台线程预加载后续帧
+                    self._prefetch_async(idx)
+            except Exception as e:
+                print(f"[Animator] 异步加载帧 {idx} 失败: {e}")
+        threading.Thread(target=_load, daemon=True).start()
 
     def _decode_frame(self, idx: int) -> Optional[Image.Image]:
         """解码单帧（从文件读取+解码+resize+颜色转换）"""
@@ -806,13 +818,15 @@ class VideoAnimationApp:
             dt = now - self._last_render_time
             self._last_render_time = now
 
-            # 帧率统计（每半秒更新一次显示）
+            # 帧率统计（每秒更新一次显示）
             self._fps_times.append(now)
             while len(self._fps_times) > 0 and self._fps_times[0] < now - 1.0:
                 self._fps_times.pop(0)
-            if len(self._fps_times) > 0:
-                fps = len(self._fps_times) / (self._fps_times[-1] - self._fps_times[0])
-                self._fps_display.set(f"{fps:.1f} FPS")
+            if len(self._fps_times) >= 2:
+                span = self._fps_times[-1] - self._fps_times[0]
+                if span > 0.001:
+                    fps = (len(self._fps_times) - 1) / span
+                    self._fps_display.set(f"{fps:.1f} FPS")
 
             # 更新引擎状态（动画帧推进）
             self.engine.update(min(dt, 0.1))

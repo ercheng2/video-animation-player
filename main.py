@@ -12,12 +12,18 @@ import socket
 import threading
 import time
 import queue
+import re
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+
+
+def natural_sort_key(s):
+    """自然排序键：将 'frame_10.png' 中的数字按数值排序而非字符串"""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
 
 
 
@@ -151,7 +157,7 @@ class SequenceAnimator:
             os.path.join(cfg.path, f)
             for f in os.listdir(cfg.path)
             if os.path.splitext(f)[1].lower() in exts
-        ])
+        ], key=natural_sort_key)
         if not files:
             return False
         cfg.total_frames = len(files)
@@ -214,7 +220,7 @@ class SequenceAnimator:
             frame_duration = self.config.frame_duration if self.config else 0.1
 
             if self._frame_timer >= frame_duration:
-                self._frame_timer = 0
+                self._frame_timer -= frame_duration
                 self._current_idx += 1
 
                 if self._current_idx >= len(self._frame_files):

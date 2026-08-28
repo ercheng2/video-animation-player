@@ -542,6 +542,7 @@ class VideoAnimationApp:
 
         # 渲染相关
         self._render_running = False
+        self._render_loop_seq = 0  # 递增序列号，防止旧循环残留
         self._last_render_time = time.time()
         self._bg_image: Optional[ImageTk.PhotoImage] = None
         self._display_size = (800, 600)
@@ -717,14 +718,26 @@ class VideoAnimationApp:
     # ─── 高性能渲染循环 ───
 
     def _start_rendering(self):
+        """启动渲染循环（递增序列号，确保旧循环不会残留）"""
+        self._render_loop_seq += 1
         if self._render_running:
             return
         self._render_running = True
         self._last_render_time = time.time()
-        self._render_loop()
+        self._schedule_render_loop()
 
-    def _render_loop(self):
+    def _schedule_render_loop(self, interval_ms=30):
+        """调度下一次渲染（在调度时捕获序列号，防止旧循环残留）"""
         if not self._render_running:
+            return
+        seq = self._render_loop_seq
+        self.root.after(interval_ms, lambda: self._render_loop(seq))
+
+    def _render_loop(self, seq=None):
+        if seq is None:
+            seq = self._render_loop_seq
+        if not self._render_running or seq != self._render_loop_seq:
+            self._render_running = False
             return
         try:
             now = time.time()
@@ -761,12 +774,17 @@ class VideoAnimationApp:
             if need_render:
                 self._render_frame(self._last_render_bg)
 
+            if not self._render_running or seq != self._render_loop_seq:
+                self._render_running = False
+                return
+
             # 动画播放时高频刷新（30fps），空闲时低频（10fps）省资源
             idle = self.engine.state_machine.get_state() == PlayerState.IDLE
-            self.root.after(30 if not idle else 100, self._render_loop)
+            self._schedule_render_loop(100 if idle else 30)
         except Exception as e:
             self._log(f"渲染循环异常: {e}")
-            self.root.after(30, self._render_loop)
+            if seq == self._render_loop_seq:
+                self._schedule_render_loop(30)
 
     def _render_frame(self, bg_frame: Optional[np.ndarray] = None):
         """渲染帧：无动画用PPM直显，有动画用PIL合成（缓存结果避免重复计算）"""
@@ -780,6 +798,14 @@ class VideoAnimationApp:
             anim_frame = self.engine.get_current_animation_frame()
             state = self.engine.state_machine.get_state()
             is_anim = state in (PlayerState.PLAYING_A, PlayerState.PLAYING_B)
+
+            # 调试：检查渲染状态
+            has_bg = bg_frame is not None
+            has_anim = anim_frame is not None
+            if is_anim and not has_anim:
+                print(f"[Render] 警告: 动画状态={state} 但无动画帧")
+            if has_bg and has_anim:
+                print(f"[Render] 有背景+有动画: bg={bg_frame.shape} anim={anim_frame.size}")
 
             if bg_frame is not None:
                 # ── 有背景视频 ──
@@ -918,7 +944,6 @@ class VideoAnimationApp:
         self._save_config()
 
         self.engine.shutdown()
-        self._render_running = False
 
         if self.engine.start(path, int(self._cfg.get("udp_port", 9999))):
             self._start_rendering()
@@ -926,6 +951,7 @@ class VideoAnimationApp:
             self._log(f"已切换背景视频: {path}")
         else:
             messagebox.showerror("错误", f"无法打开视频文件:\n{path}")
+            self._start_rendering()
 
     # ─── 序列帧：选文件自动识别文件夹 ───
 

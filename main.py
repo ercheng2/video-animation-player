@@ -103,6 +103,12 @@ class BackgroundVideoReader:
                         # 循环播放
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         continue
+                    # 在读取线程中缩小到1/2尺寸：
+                    # 1) 减少队列内存占用 2) 降低主线程渲染负担 3) 减少IO竞争
+                    h, w = frame.shape[:2]
+                    if w > 1920 or h > 1080:
+                        frame = cv2.resize(frame, (w // 2, h // 2),
+                                           interpolation=cv2.INTER_LINEAR)
                     with self._lock:
                         self._latest_frame = frame.copy()
                     # 非阻塞放入队列
@@ -135,7 +141,7 @@ class BackgroundVideoReader:
 
 
 class SequenceAnimator:
-    """序列帧动画播放器 - 按需加载帧，不预加载到内存"""
+    """序列帧动画播放器 - 按需加载帧，后台预加载"""
     def __init__(self):
         self.config: Optional[AnimationConfig] = None
         self._frame_files: list = []     # 文件路径列表（不加载到内存）
@@ -146,7 +152,83 @@ class SequenceAnimator:
         self._finished = False
         self._lock = threading.Lock()
         self._last_frame: Optional[Image.Image] = None
-        self._cache: dict = {}           # 按需缓存：index -> PIL Image
+        self._cache: dict = {}           # 多帧缓存：index -> PIL Image
+        self._cache_max = 10             # 最多缓存10帧
+
+    def _load_frame(self, idx: int) -> Optional[Image.Image]:
+        """按需加载指定帧（多帧缓存 + 后台预加载）"""
+        if idx < 0 or idx >= len(self._frame_files):
+            return self._last_frame
+        if idx in self._cache:
+            return self._cache[idx]
+        try:
+            img = self._decode_frame(idx)
+            if img is None:
+                return self._last_frame
+            self._cache[idx] = img
+            # 控制缓存大小
+            while len(self._cache) > self._cache_max:
+                oldest = min(self._cache.keys())
+                if oldest != idx:  # 保留当前帧
+                    del self._cache[oldest]
+                else:
+                    break
+            # 后台线程预加载后续帧（不阻塞主线程）
+            self._prefetch_async(idx)
+            return img
+        except Exception as e:
+            print(f"[Animator] 加载帧 {idx} 失败: {e}")
+            return self._last_frame
+
+    def _decode_frame(self, idx: int) -> Optional[Image.Image]:
+        """解码单帧（从文件读取+解码+resize+颜色转换）"""
+        img_bytes = np.fromfile(self._frame_files[idx], dtype=np.uint8)
+        img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_UNCHANGED)
+        if img_bgra is None:
+            return None
+        # 手动缩小到 1/2 分辨率以提升后续渲染性能
+        h, w = img_bgra.shape[:2]
+        if w > 1920 or h > 1080:
+            img_bgra = cv2.resize(img_bgra, (w // 2, h // 2),
+                                  interpolation=cv2.INTER_LINEAR)
+        # 保留 alpha 通道（支持透明 PNG 序列帧）
+        if len(img_bgra.shape) == 3 and img_bgra.shape[2] == 4:
+            img_rgba = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2RGBA)
+            return Image.fromarray(img_rgba, mode='RGBA')
+        elif len(img_bgra.shape) == 3 and img_bgra.shape[2] == 3:
+            img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(img_rgb, mode='RGB')
+        else:
+            img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_GRAY2RGB)
+            return Image.fromarray(img_rgb, mode='RGB')
+
+    def _prefetch_async(self, current_idx: int):
+        """后台线程预加载后续3帧（消除帧切换时的IO等待）"""
+        def _prefetch():
+            for offset in range(1, 4):
+                nidx = current_idx + offset
+                if nidx >= len(self._frame_files):
+                    if self._loop:
+                        nidx = 0
+                    else:
+                        continue
+                with self._lock:
+                    if nidx in self._cache:
+                        continue
+                try:
+                    img = self._decode_frame(nidx)
+                    if img is not None:
+                        with self._lock:
+                            self._cache[nidx] = img
+                            while len(self._cache) > self._cache_max:
+                                oldest = min(self._cache.keys())
+                                if oldest != current_idx:
+                                    del self._cache[oldest]
+                                else:
+                                    break
+                except Exception:
+                    pass
+        threading.Thread(target=_prefetch, daemon=True).start()
 
     def load_config(self, cfg: AnimationConfig) -> bool:
         """加载序列帧配置（只扫描目录，不加载图片到内存）"""
@@ -169,44 +251,6 @@ class SequenceAnimator:
         self._last_frame = None
         print(f"[Animator] 已扫描 {len(files)} 帧（按需加载）: {cfg.path}")
         return True
-
-    def _load_frame(self, idx: int) -> Optional[Image.Image]:
-        """按需加载指定帧（带简单缓存）"""
-        if idx < 0 or idx >= len(self._frame_files):
-            return self._last_frame
-        if idx in self._cache:
-            return self._cache[idx]
-        try:
-            # 用 np.fromfile + cv2.imdecode 替代 cv2.imread
-            # 原因：cv2.imread 在 Windows 上不支持中文路径，而 np.fromfile 支持
-            # IMREAD_REDUCED_UNCHANGED_2 在某些 OpenCV 版本/imdecode 中不可靠
-            # 改用 IMREAD_UNCHANGED 全尺寸解码再手动缩小，更稳定
-            img_bytes = np.fromfile(self._frame_files[idx], dtype=np.uint8)
-            img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_UNCHANGED)
-            if img_bgra is None:
-                return self._last_frame
-            # 手动缩小到 1/2 分辨率以提升后续渲染性能
-            h, w = img_bgra.shape[:2]
-            if w > 1920 or h > 1080:
-                img_bgra = cv2.resize(img_bgra, (w // 2, h // 2),
-                                      interpolation=cv2.INTER_LINEAR)
-            # 保留 alpha 通道（支持透明 PNG 序列帧）
-            if len(img_bgra.shape) == 3 and img_bgra.shape[2] == 4:
-                img_rgba = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2RGBA)
-                img = Image.fromarray(img_rgba, mode='RGBA')
-            elif len(img_bgra.shape) == 3 and img_bgra.shape[2] == 3:
-                img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(img_rgb, mode='RGB')
-            else:
-                # 灰度图 → 转 RGB
-                img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_GRAY2RGB)
-                img = Image.fromarray(img_rgb, mode='RGB')
-            # 只缓存当前帧
-            self._cache = {idx: img}
-            return img
-        except Exception as e:
-            print(f"[Animator] 加载帧 {idx} 失败: {e}")
-            return self._last_frame
 
     def start(self):
         """开始播放"""

@@ -177,8 +177,10 @@ class SequenceAnimator:
         if idx in self._cache:
             return self._cache[idx]
         try:
-            # 用OpenCV以1/2分辨率加载，比PIL加载全尺寸快4-8倍
-            img_bgr = cv2.imread(self._frame_files[idx], cv2.IMREAD_REDUCED_COLOR_2)
+            # 用 np.fromfile + cv2.imdecode 替代 cv2.imread
+            # 原因：cv2.imread 在 Windows 上不支持中文路径，而 np.fromfile 支持
+            img_bytes = np.fromfile(self._frame_files[idx], dtype=np.uint8)
+            img_bgr = cv2.imdecode(img_bytes, cv2.IMREAD_REDUCED_COLOR_2)
             if img_bgr is None:
                 return self._last_frame
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)

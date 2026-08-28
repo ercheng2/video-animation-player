@@ -179,17 +179,27 @@ class SequenceAnimator:
         try:
             # 用 np.fromfile + cv2.imdecode 替代 cv2.imread
             # 原因：cv2.imread 在 Windows 上不支持中文路径，而 np.fromfile 支持
-            # 用 IMREAD_REDUCED_UNCHANGED_2 保留 alpha 通道（1/2分辨率）
+            # IMREAD_REDUCED_UNCHANGED_2 在某些 OpenCV 版本/imdecode 中不可靠
+            # 改用 IMREAD_UNCHANGED 全尺寸解码再手动缩小，更稳定
             img_bytes = np.fromfile(self._frame_files[idx], dtype=np.uint8)
-            img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_REDUCED_UNCHANGED_2)
+            img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_UNCHANGED)
             if img_bgra is None:
                 return self._last_frame
+            # 手动缩小到 1/2 分辨率以提升后续渲染性能
+            h, w = img_bgra.shape[:2]
+            if w > 1920 or h > 1080:
+                img_bgra = cv2.resize(img_bgra, (w // 2, h // 2),
+                                      interpolation=cv2.INTER_LINEAR)
             # 保留 alpha 通道（支持透明 PNG 序列帧）
-            if img_bgra.shape[2] == 4:
+            if len(img_bgra.shape) == 3 and img_bgra.shape[2] == 4:
                 img_rgba = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2RGBA)
                 img = Image.fromarray(img_rgba, mode='RGBA')
-            else:
+            elif len(img_bgra.shape) == 3 and img_bgra.shape[2] == 3:
                 img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(img_rgb, mode='RGB')
+            else:
+                # 灰度图 → 转 RGB
+                img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_GRAY2RGB)
                 img = Image.fromarray(img_rgb, mode='RGB')
             # 只缓存当前帧
             self._cache = {idx: img}

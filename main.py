@@ -179,12 +179,18 @@ class SequenceAnimator:
         try:
             # 用 np.fromfile + cv2.imdecode 替代 cv2.imread
             # 原因：cv2.imread 在 Windows 上不支持中文路径，而 np.fromfile 支持
+            # 用 IMREAD_REDUCED_UNCHANGED_2 保留 alpha 通道（1/2分辨率）
             img_bytes = np.fromfile(self._frame_files[idx], dtype=np.uint8)
-            img_bgr = cv2.imdecode(img_bytes, cv2.IMREAD_REDUCED_COLOR_2)
-            if img_bgr is None:
+            img_bgra = cv2.imdecode(img_bytes, cv2.IMREAD_REDUCED_UNCHANGED_2)
+            if img_bgra is None:
                 return self._last_frame
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img_rgb)
+            # 保留 alpha 通道（支持透明 PNG 序列帧）
+            if img_bgra.shape[2] == 4:
+                img_rgba = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2RGBA)
+                img = Image.fromarray(img_rgba, mode='RGBA')
+            else:
+                img_rgb = cv2.cvtColor(img_bgra, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(img_rgb, mode='RGB')
             # 只缓存当前帧
             self._cache = {idx: img}
             return img
@@ -790,10 +796,14 @@ class VideoAnimationApp:
                     ratio = min(cw / aw, ch / ah)
                     if ratio < 1.0:
                         dw, dh = int(aw * ratio), int(ah * ratio)
-                        display_img = anim_frame.resize((dw, dh), Image.BILINEAR).convert("RGB")
+                        display_img = anim_frame.resize((dw, dh), Image.BILINEAR)
                     else:
-                        display_img = anim_frame.convert("RGB")
-                    self._bg_image = ImageTk.PhotoImage(display_img)
+                        display_img = anim_frame
+                    # 如果序列帧有透明通道，合成到黑色背景上
+                    if display_img.mode == "RGBA":
+                        black_bg = Image.new("RGBA", display_img.size, (0, 0, 0, 255))
+                        display_img = Image.alpha_composite(black_bg, display_img)
+                    self._bg_image = ImageTk.PhotoImage(display_img.convert("RGB"))
                 else:
                     # 全黑
                     if self._canvas_image_id is not None:

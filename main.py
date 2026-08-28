@@ -552,10 +552,12 @@ class VideoAnimationApp:
         self._config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_config.json")
         self._load_config()
 
-        # 渲染缓存（只缓存缩放后的动画帧，不缓存合成结果）
+        # 渲染缓存（只缓存缩放后的动画帧 numpy array，不缓存合成结果）
         self._last_anim_idx = -1
         self._last_render_size = (0, 0)
-        self._cached_anim_resized: Optional[Image.Image] = None
+        self._cached_anim_np: Optional[np.ndarray] = None      # float32 [0,1] RGBA
+        self._cached_anim_alpha: Optional[np.ndarray] = None   # alpha 通道
+        self._cached_anim_rgb: Optional[np.ndarray] = None     # RGB 通道
         self._cached_anim_size = (0, 0)
 
         self._build_ui()
@@ -777,9 +779,9 @@ class VideoAnimationApp:
                 self._render_running = False
                 return
 
-            # 动画播放时高频刷新（30fps），空闲时低频（10fps）省资源
+            # 动画播放时匹配视频帧率（25fps=40ms），空闲时低频（100ms）省资源
             idle = self.engine.state_machine.get_state() == PlayerState.IDLE
-            self._schedule_render_loop(100 if idle else 30)
+            self._schedule_render_loop(100 if idle else 40)
         except Exception as e:
             self._log(f"渲染循环异常: {e}")
             if seq == self._render_loop_seq:
@@ -849,7 +851,7 @@ class VideoAnimationApp:
             self._log(f"渲染异常: {e}")
 
     def _render_with_anim(self, bg_resized: np.ndarray, anim_frame: Image.Image, tw: int, th: int):
-        """PIL合成动画帧 - 每次都重新合成确保背景帧实时更新，但缓存缩放后的动画帧避免重复resize"""
+        """OpenCV alpha 合成 - 比 PIL alpha_composite 快数倍，避免 PIL 大图转换开销"""
         # 取当前动画帧索引
         state = self.engine.state_machine.get_state()
         if state == PlayerState.PLAYING_A:
@@ -857,25 +859,30 @@ class VideoAnimationApp:
         else:
             anim_idx = self.engine.animator_b.current_idx
 
-        # 缓存缩放后的动画帧（避免每帧重复缩放）
+        # 动画帧变化时：缩放 + 转 float32 numpy array（缓存，避免每帧重复）
         if anim_idx != self._last_anim_idx or (tw, th) != self._cached_anim_size:
             anim_resized = anim_frame.resize((tw, th), Image.BILINEAR)
             if anim_resized.mode != "RGBA":
                 anim_resized = anim_resized.convert("RGBA")
-            self._cached_anim_resized = anim_resized
+            anim_np = np.array(anim_resized, dtype=np.float32) / 255.0
+            self._cached_anim_np = anim_np
+            self._cached_anim_alpha = anim_np[:, :, 3:4]  # (h, w, 1)
+            self._cached_anim_rgb = anim_np[:, :, :3]     # (h, w, 3)
             self._last_anim_idx = anim_idx
             self._cached_anim_size = (tw, th)
-        else:
-            anim_resized = self._cached_anim_resized
 
-        # 背景帧每次都重新合成（不缓存，因为背景帧实时变化）
-        bg_rgb = cv2.cvtColor(bg_resized, cv2.COLOR_BGR2RGB)
-        bg_pil = Image.fromarray(bg_rgb).convert("RGBA")
+        # OpenCV 矩阵 alpha 合成（比 PIL alpha_composite 快很多）
+        # bg_resized HWC BGR uint8，转 RGB float32
+        bg_rgb = bg_resized[:, :, ::-1].astype(np.float32) / 255.0  # BGR→RGB 视图反转，不复制数据
 
-        composite = Image.alpha_composite(bg_pil, anim_resized)
-        display_img = composite.convert("RGB")
+        # result = anim_rgb * alpha + bg_rgb * (1 - alpha)
+        result = (self._cached_anim_rgb * self._cached_anim_alpha +
+                  bg_rgb * (1.0 - self._cached_anim_alpha)).clip(0, 1)
+        result_bgr = (result * 255).astype(np.uint8)[:, :, ::-1]  # RGB→BGR
 
-        self._bg_image = ImageTk.PhotoImage(display_img)
+        # PPM 直显（避免 PIL ImageTk.PhotoImage 的额外开销）
+        _, encoded = cv2.imencode('.ppm', result_bgr)
+        self._bg_image = tk.PhotoImage(data=encoded.tobytes())
 
     def _on_canvas_resize(self, event):
         pass

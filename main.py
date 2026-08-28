@@ -167,15 +167,33 @@ class SequenceAnimator:
 
     def _load_frame(self, idx: int) -> Optional[Image.Image]:
         """按需加载指定帧（多帧缓存 + 后台预加载）
-        缓存未命中时不阻塞主线程，立即返回上一帧，后台异步加载当前帧
+        - 有上一帧可回退时：缓存未命中不阻塞，立即返回上一帧，后台异步加载
+        - 首次加载（无上一帧）：必须同步加载，确保第一帧能显示
         """
         if idx < 0 or idx >= len(self._frame_files):
             return self._last_frame
         if idx in self._cache:
             return self._cache[idx]
-        # 缓存未命中 → 立即返回上一帧，后台异步加载，不阻塞渲染循环
+        # 没有上一帧可回退 → 必须同步加载（首次播放的第一帧）
+        if self._last_frame is None:
+            return self._load_frame_sync(idx)
+        # 有上一帧 → 缓存未命中时异步加载，不阻塞渲染循环
         self._load_frame_async(idx)
         return self._last_frame
+
+    def _load_frame_sync(self, idx: int) -> Optional[Image.Image]:
+        """同步加载指定帧（首次播放时确保第一帧显示）"""
+        try:
+            img = self._decode_frame(idx)
+            if img is None:
+                return None
+            self._cache[idx] = img
+            # 后台预加载后续帧
+            self._prefetch_async(idx)
+            return img
+        except Exception as e:
+            print(f"[Animator] 同步加载帧 {idx} 失败: {e}")
+            return None
 
     def _load_frame_async(self, idx: int):
         """后台异步加载指定帧（不阻塞主线程）"""
